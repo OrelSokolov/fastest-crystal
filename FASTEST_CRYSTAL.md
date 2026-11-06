@@ -4,102 +4,108 @@
 на hot loops в C-стильном коде (порты brotli.cr / freetype.cr: предаллоцированные
 буферы, индексы вместо указателей, ноль аллокаций в горячем пути). Разрыв —
 чисто кодогенерационный: GC (Boehm) в таких программах накладных расходов
-не создаёт. Ниже — четыре фичи, закрывающие его, с точками входа в этом
-форке. Порядок внедрения — по соотношению усилие/выигрыш.
+не создаёт. Ниже — четыре фичи, закрывающие его. Общий принцип: всё это
+opt-in аннотации и флаги сборки, а не новый синтаксис и не новый дефолт;
+обычный код не меняется ни на символ.
 
-Общий принцип: всё это opt-in аннотации и флаги сборки, а не новый синтаксис
-и не новый дефолт. Обычный код не меняется ни на символ.
+Статус: **№4, №2, №3 реализованы и протестированы** (см. детали);
+№1 (computed goto) — в работе.
 
 ---
 
-## №4. Публичный `Intrinsics` + `llvm.prefetch` (компилятор не трогается)
+## №4. Публичный `Intrinsics` + `llvm.prefetch` — ГОТОВО
 
-`Intrinsics` — это stdlib (`src/intrinsics.cr`), а не механизм компилятора:
-`lib LibIntrinsics` объявляет `fun` с LLVM-именами (`"llvm.memcpy..."`),
-кодеген уже распознаёт их по префиксу имени (`src/compiler/crystal/codegen/ast.cr`).
+`Intrinsics` — stdlib (`src/intrinsics.cr`), а не механизм компилятора:
+`lib LibIntrinsics` объявляет `fun` с LLVM-именами, кодеген распознаёт их
+по префиксу `llvm.`.
 
-Доделать:
-- [ ] Обнародовать обёртки над уже объявленными интринзиками (модуль
-  `Intrinsics` уже публичный — добавить `prefetch`, недостающие обёртки).
-- [ ] `llvm.prefetch` с версионной веткой: до LLVM 15 —
-      `llvm.prefetch.p0i8(ptr, read, rw, locality, cache)`,
-      с LLVM 15 — `llvm.prefetch.p0(ptr, read, locality, cache)`
-      (аргумент `rw` удалён, мангля сменился). Паттерн ветвления по
-      `Crystal::LLVM_VERSION` уже есть в этом же файле.
-- [ ] Обёртка `Intrinsics.prefetch(address, locality = 3, read_data = true)`.
-- [ ] `@[Primitive(:interpreter_intrinsics_prefetch)]` для `crystal i`.
+- [x] `llvm.prefetch` с версионной веткой (LLVM <15: `p0i8` + аргумент `rw`;
+      ≥15: `p0`, без `rw`).
+- [x] Обёртка-макрос `Intrinsics.prefetch(address, locality = 3, read_data = true)`:
+      `locality`/`read_data` обязаны быть литералами — LLVM требует
+      immarg-константы (не-литерал → понятная ошибка на макро-этапе).
+- [x] `@[Primitive(:interpreter_intrinsics_prefetch)]` для `crystal i` (no-op).
+- [x] Спек: `spec/std/intrinsics_prefetch_spec.cr`.
 
-Оценка: ~20–40 строк. Выигрыш: единицы процентов.
-
-## №2. `@[NoAlias]` — аналог `restrict` (главный пункт для encoder'ов)
+## №2. `@[NoAlias]` — аналог `restrict` — ГОТОВО
 
 Без обещания «указатели не пересекаются» LLVM не векторизирует циклы, где
-input и output читаются/пишутся вместе. Вся инфраструктура уже есть:
-`LLVM::Attribute::NoAlias` в enum, `Function#add_attribute` на параметр,
-аннотации на аргументах def уже парсятся и переживают клонирование.
+input и output читаются/пишутся вместе.
 
-Доделать:
-- [ ] Зарегистрировать аннотацию `NoAlias` (по образцу `NoInline`:
-      `semantic/program.cr`, `semantic/top_level_visitor.cr`,
-      `semantic/ast.cr`).
-- [ ] В цикле выставления атрибутов параметров (`codegen/fun.cr`, цикл
-      `args.each` с `add_attribute(attr, i + offset + 1)`) ставить
-      `NoAlias`, если аргумент аннотирован и его тип — указатель
-      (`Pointer`, `Slice`). Для не-указательных — ошибка компиляции:
-      верификатор LLVM требует `noalias` только на pointer-типах.
-- [ ] Разрешить `@[NoAlias]` на `fun` в `lib` (главной use-case —
-      C-байндинги вроде memcpy).
-- [ ] Спеки: атрибут виден через `Function#attributes(index)`.
+- [x] Аннотация зарегистрирована (`semantic/program.cr`); парсинг аннотаций
+      аргументов в `lib fun` (`syntax/parser.cr`, `parse_fun_def`) и перенос
+      в `External` (`semantic/top_level_visitor.cr`).
+- [x] Кодеген ставит `noalias` на параметры (`codegen/fun.cr`, оба пути —
+      def и lib fun). Не-указательный аргумент — ошибка компиляции.
+- [x] Спеки: `spec/compiler/codegen/fun_spec.cr` (атрибуты проверяются
+      через `LLVM::Function#attributes(index)`).
 
-Синтаксис: `def copy(@[NoAlias] dst : Pointer(UInt8), @[NoAlias] src : Pointer(UInt8))`.
+Синтаксис:
 
-Оценка: ~25–40 строк в 3 файлах. Выигрыш: разблокировка векторизации.
+```crystal
+def copy(@[NoAlias] dst : Pointer(UInt8), @[NoAlias] src : Pointer(UInt8))
+lib Lib
+  fun my_copy(@[NoAlias] dst : UInt8*, @[NoAlias] src : UInt8*, len : UInt64)
+end
+```
 
-## №3. PGO — прокинуть LLVM-профилирование в `crystal build`
+WARNING: ложный noalias — UB после оптимизации, как и ложный `restrict` в C.
 
-`--release` сегодня — это просто `default<O3>` через `LLVM.run_passes`.
-C-API не умеет передавать PGO-профиль в PassBuilderOptions, поэтому нужен
-C++ в существующей шайбе `src/llvm/ext/llvm_ext.cc` (прецедент —
-`LLVMExt*`-функции): обёртка над `llvm::PassBuilder::runPasses(..., PGOOptions)`.
+## №3. PGO — ГОТОВО
 
-Доделать:
-- [ ] `LLVMExtRunPassesWithPGO(mod, passes, tm, action, profile_file)` в
-      `llvm_ext.cc`, ограничить по версии LLVM (≥ 15) через
-      `IS_LT_150`-флаги; декларация в `src/llvm/lib_llvm_ext.cr`.
-- [ ] Флаги CLI: `--pgo-gen` (instrument: pass-строка
-      `function(pgo-instr-gen),default<Ox>` + линковка
-      `libclang_rt.profile`) и `--pgo-use=FILE` (чтение `.profdata`).
-- [ ] Прокидывание из `Crystal::Compiler#optimize` (место вызова
-      `LLVM.run_passes`).
-- [ ] Инвалидация биткод-кэша: в ключ кэша добавить хэш профиля.
-- [ ] Понятная деградация, если runtime/profile не найден.
+- [x] C++-шайба `LLVMExtRunPassesWithPGO` (`src/llvm/ext/llvm_ext.cc`,
+      LLVM ≥18): `PassBuilder` с `PGOOptions` (IRInstr / IRUse).
+- [x] Флаги `--pgo-gen` / `--pgo-use=FILE` (CLI в `command.cr`,
+      `compiler.cr`).
+- [x] Линковка runtime: выбирает `libclang_rt.profile-<arch>.a` под
+      мажор-версию LLVM компилятора; `-u__llvm_profile_runtime` (как clang)
+      + `-z now`.
+- [x] PGO-флаги в ключе биткод-кэша.
+- [x] e2e-тест: gen → run → `llvm-profdata merge` → use; вывод идентичен,
+      PGO-сборка быстрее инструментированной (~30% на тесте с fib).
 
-Оценка: ~150–250 строк (шайба + CLI + кэш). Выигрыш: 10–20% на ветвистом
-коде — крупнейший одиночный источник отставания.
+Workflow:
 
-## №1. Computed goto — диспетчер состояний на `indirectbr`
+```
+crystal build --release --pgo-gen f.cr -o f_gen
+./f_gen                                   # пишет default_%m.profraw
+llvm-profdata merge -output=p.profdata default_*.profraw
+crystal build --release --pgo-use=p.profdata f.cr
+```
+
+Особенности (выяснены при отладке):
+- **Value profiling отключён** (`-disable-vp` в шайбе): рантайм
+  профайлера портит список vnode при стартовом бёрсте инструментированных
+  непрямых вызовов Crystal (файберный шедулер, воркер-потоки) — SIGSEGV в
+  `__llvm_profile_instrument_target`. Ветка-веса (главный источник
+  выигрыша PGO) не затронуты.
+- Имя файла профайла задаёт рантайм (`default_%m.profraw`); переопределяется
+  env `LLVM_PROFILE_FILE`. Отдельный аргумент в `--pgo-gen` не поддерживается:
+  LLVM игнорирует `PGOOptions.ProfileFile` для output-имени (это делает
+  clang-фронтенд).
+- Без `--release`/`-O` PGO-флаги не действуют (кодеген пропускает optimize
+  на O0).
+
+## №1. Computed goto — диспетчер состояний на `indirectbr` — В РАБОТЕ
 
 Интерпретатор TrueType hinting (`case @opcode` на ~200 опкодов) и декодер
 brotli (`case phase`) в C едут на labels-as-values: `goto *ptr` в голову
 нужного цикла, частые переходы — предсказуемый fall-through. В Crystal
 каждый переход — цепочка сравнений + прыжок через голову цикла (ломается
 BTB). `LLVMBlockAddress`/`LLVMBuildIndirectBr`/`LLVMAddDestination` есть в
-C-API во всех поддерживаемых версиях, но в биндингах Crystal их нет.
+C-API, но в биндингах Crystal их нет.
 
 Дизайн: НЕ новый синтаксис `goto`, а аннотация `@[ComputedGoto]` на def +
-скрытый пасс кодегена, распознающий паттерн
-`while true; case x; when <Int-константы>` и собирающий таблицу
-`blockaddress` + `indirectbr`.
+пасс кодегена, распознающий паттерн `while true; case x; when <константы>`
+и собирающий таблицу `blockaddress` + `indirectbr`.
 
-Доделать:
 - [ ] C-биндинги `LLVMBlockAddress`, `LLVMBuildIndirectBr`,
       `LLVMAddDestination` в `src/llvm/lib_llvm/core.cr` + обёртки в
       `src/llvm/builder.cr` (образец — `switch`).
 - [ ] Аннотация `ComputedGoto` (паттерн `NoInline`).
-- [ ] Пасс кодегена `codegen/computed_goto.cr`: по образцу `while`
-      (`codegen/codegen.cr`) и switch-диспетчера type_id
-      (`codegen/primitives.cr`) — все блоки создаются заранее, потом
-      indirectbr-таблица.
+- [ ] Пасс кодегена: все блоки создаются заранее, потом indirectbr-таблица
+      (образцы: кодеген `while` в `codegen/codegen.cr`, switch-диспетчер
+      type_id в `codegen/primitives.cr`).
 - [ ] Обязательный `NoInline` для таких def (LLVM не инлайнит функции
       с address-taken блоками).
 - [ ] Запрет переходов через границы rescue/ensure (EH через
@@ -108,18 +114,16 @@ C-API во всех поддерживаемых версиях, но в бин�
       запрет в интерпретаторе.
 
 Оценка: биндинги ~15–25 строк; пасс ~150–400 строк. Выигрыш: 5–15% на
-пиковых циклах декодера/интерпретатора. Единственная фича, требующая
-дизайна и измерений — LLVM исторически неохотно инлайнит функции с
-`indirectbr`, «магии C» автоматически не получится.
+пиковых циклах. Единственная фича, требующая измерений — LLVM неохотно
+инлайнит функции с `indirectbr`, «магии C» автоматически не получится.
 
 ---
 
 ## Порядок работы
 
-**№4 → №2 → №3 → №1.** Первые две — механические патчи по готовым
-образцам (дни), их эффект можно сразу мерить на fastest-freetype.cr и
-fastest-brotli.cr. №3 — недели, основной риск — мультиверсионность LLVM
-в C++-шайбе. №1 — дизайн + бенчмарки.
+**№4 → №2 → №3 → №1.** Первые две — механические патчи по готовым образцам
+(сделаны), их эффект можно мерить на fastest-freetype.cr и
+fastest-brotli.cr. №3 сделана. №1 — дизайн + бенчмарки.
 
 Escape analysis / ручное управление памятью осознанно не входят в план:
 для C-стильного кода с предаллокацией они ничего не дают.
