@@ -350,7 +350,16 @@ module Crystal
 
     private def bc_flags_changed?(output_dir)
       bc_flags_changed = true
-      current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}|#{@pgo_gen}|#{@pgo_use}|pgo1"
+      # NB: distinguish "flag unset" from "flag set to the empty string" —
+      # a bare `--pgo-gen` sets @pgo_gen = "" and `#{nil}` also interpolates
+      # to "", so both plain and pgo-gen builds produced the same cache key.
+      # Since the cached .bc is the *unoptimized* bitcode (instrumentation
+      # happens during optimize), a pgo-gen build following a plain build of
+      # identical sources would then silently reuse the plain .o and link an
+      # uninstrumented binary. Explicit markers make the modes disjoint.
+      pgo_gen_key = @pgo_gen ? "gen:#{@pgo_gen}" : "nogen"
+      pgo_use_key = @pgo_use ? "use:#{@pgo_use}" : "nouse"
+      current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}|#{pgo_gen_key}|#{pgo_use_key}|pgo2"
       bc_flags_filename = "#{output_dir}/bc_flags#{optimization_mode.suffix}"
       if File.file?(bc_flags_filename)
         previous_bc_flags = File.read(bc_flags_filename).strip
