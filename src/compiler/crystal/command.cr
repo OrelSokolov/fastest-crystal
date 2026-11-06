@@ -566,6 +566,12 @@ class Crystal::Command
             raise Error.new("Invalid optimization mode: O#{level}")
           end
         end
+        opts.on("--pgo-gen", "Add PGO instrumentation; counters are written to default_%m.profraw at exit (honors LLVM_PROFILE_FILE)") do
+          compiler.pgo_gen = ""
+        end
+        opts.on("--pgo-use=FILE", "Optimize using the PGO profile FILE (produced by `llvm-profdata merge`)") do |file|
+          compiler.pgo_use = file
+        end
       end
 
       opts.on("-s", "--stats", "Enable statistics output") do
@@ -711,6 +717,12 @@ class Crystal::Command
       else
         raise Error.new("Invalid optimization mode: O#{level}")
       end
+    end
+    opts.on("--pgo-gen", "Add PGO instrumentation; counters are written to default_%m.profraw at exit (honors LLVM_PROFILE_FILE)") do
+      compiler.pgo_gen = ""
+    end
+    opts.on("--pgo-use=FILE", "Optimize using the PGO profile FILE (produced by `llvm-profdata merge`)") do |file|
+      compiler.pgo_use = file
     end
     opts.on("--single-module", "Generate a single LLVM module") do
       compiler.single_module = true

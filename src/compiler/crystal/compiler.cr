@@ -151,6 +151,15 @@ module Crystal
     # Sets the Optimization mode.
     property optimization_mode = OptimizationMode::O0
 
+    # If set, compile with PGO instrumentation (`--pgo-gen[=FILE]`): the
+    # produced binary writes LLVM counter profiles to FILE at exit
+    # (default `default_%m.profraw`); merge them with `llvm-profdata`.
+    property pgo_gen : String? = nil
+
+    # If set, optimize using the given merged profile file
+    # (`--pgo-use=FILE`, produced by `llvm-profdata merge`).
+    property pgo_use : String? = nil
+
     # Sets the code model. Check LLVM docs to learn about this.
     property mcmodel = LLVM::CodeModel::Default
 
@@ -341,7 +350,7 @@ module Crystal
 
     private def bc_flags_changed?(output_dir)
       bc_flags_changed = true
-      current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}"
+      current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}|#{@pgo_gen}|#{@pgo_use}|pgo1"
       bc_flags_filename = "#{output_dir}/bc_flags#{optimization_mode.suffix}"
       if File.file?(bc_flags_filename)
         previous_bc_flags = File.read(bc_flags_filename).strip
@@ -550,8 +559,31 @@ module Crystal
 
         link_flags = use_modern_linker(link_flags)
 
+        link_flags += " #{pgo_runtime_linker_flags}" if @pgo_gen
+
         {DEFAULT_LINKER, %(#{DEFAULT_LINKER} "${@}" -o #{Process.quote_posix(output_filename)} #{link_flags} #{program.lib_flags(@cross_compile)}), object_names}
       end
+    end
+
+    # Locates the clang profile runtime (`libclang_rt.profile-*.a`) needed to
+    # link a PGO-instrumented binary (`--pgo-gen`). Prefers a runtime matching
+    # the LLVM version this compiler was built against (its raw profile format
+    # version must match the instrumentation).
+    private def pgo_runtime_linker_flags : String
+      arch = @codegen_target.architecture
+      llvm_major = {{ Crystal::LLVM_VERSION.split(".")[0] }}
+      candidates = Dir.glob("/usr/lib*/clang/*/lib/*/libclang_rt.profile-#{arch}.a")
+      pgo_runtime = candidates.find { |path| path.includes?("/clang/#{llvm_major}") } ||
+                    candidates.find { |path| path.includes?("/clang/#{llvm_major}.") }
+      unless pgo_runtime
+        raise CompilerError.new(
+          "--pgo-gen needs the clang profile runtime (libclang_rt.profile-#{arch}.a for LLVM #{llvm_major}) to link an instrumented binary; install clang/compiler-rt for LLVM #{llvm_major} or pass the library manually via --link-flags"
+        )
+      end
+      # `-u__llvm_profile_runtime`: force-pull the runtime's registration
+      # constructor from the static archive (same as clang), so counters are
+      # written at exit; `-z now`: eager binding (stability with worker threads).
+      "-Wl,-u,__llvm_profile_runtime -Wl,-z,now #{pgo_runtime}"
     end
 
     # Tests if `mold` or `lld` are available and prefers them as linkers over
@@ -789,8 +821,29 @@ module Crystal
         optimization_mode = @optimization_mode
         optimization_mode = OptimizationMode::O2 if optimization_mode.os? || optimization_mode.oz?
 
-        LLVM::PassBuilderOptions.new do |options|
-          LLVM.run_passes(llvm_mod, "default<#{optimization_mode}>", target_machine, options)
+        if @pgo_gen || @pgo_use
+          {% if LibLLVM::IS_LT_180 %}
+            raise CompilerError.new("--pgo-gen/--pgo-use require LLVM 18 or newer, this compiler was built against LLVM #{LibLLVM::VERSION}")
+          {% else %}
+            mode = @pgo_gen ? 0 : 1
+            profile_file = (@pgo_gen || @pgo_use || "").to_s
+            err = LibLLVMExt.run_passes_with_pgo(
+              llvm_mod,
+              "default<#{optimization_mode}>",
+              target_machine,
+              profile_file,
+              mode,
+              1, 1, 1
+            )
+            unless err.null?
+              message = String.new(LibLLVM.get_error_message(err))
+              raise CompilerError.new("PGO failed: #{message}")
+            end
+          {% end %}
+        else
+          LLVM::PassBuilderOptions.new do |options|
+            LLVM.run_passes(llvm_mod, "default<#{optimization_mode}>", target_machine, options)
+          end
         end
       {% end %}
     end

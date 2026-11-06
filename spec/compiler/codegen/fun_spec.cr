@@ -51,4 +51,50 @@ describe "Codegen: fun" do
 
     mod.to_s.should contain("define void @__crystal_main")
   end
+
+  it "sets noalias attribute from @[NoAlias] on lib fun pointer args" do
+    mod = codegen(<<-CRYSTAL)
+      lib Lib
+        fun my_copy = "my_copy"(@[NoAlias] dst : UInt8*, @[NoAlias] src : UInt8*, len : UInt64) : Void
+      end
+
+      Lib.my_copy(Pointer(UInt8).new(0_u64), Pointer(UInt8).new(0_u64), 0_u64)
+      CRYSTAL
+
+    func = mod.functions["my_copy"]
+    func.attributes(LLVM::AttributeIndex.new(1)).no_alias?.should be_true
+    func.attributes(LLVM::AttributeIndex.new(2)).no_alias?.should be_true
+    func.attributes(LLVM::AttributeIndex.new(3)).no_alias?.should be_false
+  end
+
+  it "sets noalias attribute from @[NoAlias] on def pointer args" do
+    mod = codegen(<<-CRYSTAL)
+      def copy(@[NoAlias] dst : UInt8*, @[NoAlias] src : UInt8*, len : UInt64)
+        len
+      end
+
+      copy(Pointer(UInt8).new(0_u64), Pointer(UInt8).new(0_u64), 0_u64)
+      CRYSTAL
+
+    func = nil
+      mod.functions.each do |cand|
+        func = cand if cand.name.starts_with?("*copy<")
+      end
+      func = func.not_nil!
+    func.attributes(LLVM::AttributeIndex.new(1)).no_alias?.should be_true
+    func.attributes(LLVM::AttributeIndex.new(2)).no_alias?.should be_true
+    func.attributes(LLVM::AttributeIndex.new(3)).no_alias?.should be_false
+  end
+
+  it "errors when @[NoAlias] is applied to a non-pointer argument" do
+    expect_raises(TypeException, "@[NoAlias] can only be applied to pointer arguments") do
+      codegen(<<-CRYSTAL)
+        def foo(@[NoAlias] x : Int32)
+          x
+        end
+
+        foo(1)
+        CRYSTAL
+    end
+  end
 end

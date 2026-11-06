@@ -5986,6 +5986,14 @@ module Crystal
               break
             end
 
+            # Parse annotations first since they would be before any actual
+            # param tokens (`@[NoAlias]` and friends).
+            annotations = nil
+            while @token.type.op_at_lsquare?
+              (annotations ||= Array(Annotation).new) << parse_annotation
+              skip_space_or_newline
+            end
+
             if @token.type.ident?
               param_name = @token.value.to_s
               param_location = @token.location
@@ -6002,7 +6010,7 @@ module Crystal
                 end
               end
 
-              params << Arg.new(param_name, nil, param_type).at(param_location)
+              params << Arg.new(param_name, nil, param_type, parsed_annotations: annotations).at(param_location)
 
               push_var_name param_name if require_body
             else

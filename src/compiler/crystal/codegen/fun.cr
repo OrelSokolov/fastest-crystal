@@ -331,6 +331,15 @@ class Crystal::CodeGenVisitor
     args.each_with_index do |arg, i|
       param = context.fun.params[i + offset]
       param.name = arg.name
+
+      # `@[NoAlias]` on an argument promises LLVM the pointer doesn't alias
+      # any other pointer accessed in this def (C `restrict`).
+      if arg.annotation(@program.no_alias_annotation)
+        unless arg.type.pointer?
+          arg.raise "@[NoAlias] can only be applied to pointer arguments, not #{arg.type}"
+        end
+        context.fun.add_attribute LLVM::Attribute::NoAlias, i + offset + 1
+      end
     end
 
     args
@@ -399,6 +408,15 @@ class Crystal::CodeGenVisitor
 
       if attr = abi_arg_type.attr
         context.fun.add_attribute(attr, i + offset + 1, abi_arg_type.type)
+      end
+
+      # `@[NoAlias]` on an argument promises LLVM the pointer doesn't alias
+      # any other pointer passed to this fun (C `restrict`).
+      if arg.annotation(@program.no_alias_annotation)
+        unless arg.type.pointer?
+          arg.raise "@[NoAlias] can only be applied to pointer arguments, not #{arg.type}"
+        end
+        context.fun.add_attribute LLVM::Attribute::NoAlias, i + offset + 1
       end
 
       i += 1 unless abi_arg_type.kind == ABI::ArgKind::Ignore

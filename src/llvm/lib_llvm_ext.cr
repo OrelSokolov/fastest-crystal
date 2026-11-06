@@ -33,4 +33,15 @@ lib LibLLVMExt
                                                                                name : Char*) : LibLLVM::ValueRef
 
   fun set_target_machine_global_isel = LLVMExtSetTargetMachineGlobalISel(t : LibLLVM::TargetMachineRef, enable : LibLLVM::Bool)
+
+  {% unless LibLLVM::IS_LT_180 %}
+    # Runs the given pass pipeline with PGO instrumentation (mode = 0) or
+    # profile-guided optimization (mode = 1). Returns null on success.
+    fun run_passes_with_pgo = LLVMExtRunPassesWithPGO(mod : LibLLVM::ModuleRef, passes : Char*,
+                                                      tm : LibLLVM::TargetMachineRef,
+                                                      profile_file : Char*, mode : LibC::Int,
+                                                      loop_unrolling : LibLLVM::Bool,
+                                                      loop_vectorization : LibLLVM::Bool,
+                                                      slp_vectorization : LibLLVM::Bool) : LibLLVM::ErrorRef
+  {% end %}
 end

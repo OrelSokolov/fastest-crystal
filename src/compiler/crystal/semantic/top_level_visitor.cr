@@ -990,7 +990,17 @@ class Crystal::TopLevelVisitor < Crystal::SemanticVisitor
 
     # We'll resolve the external args types later, in TypeDeclarationVisitor
     external_args = node.args.map do |arg|
-      Arg.new(arg.name).at(arg.location)
+      new_arg = Arg.new(arg.name).at(arg.location)
+      if anns = arg.parsed_annotations
+        process_annotations anns do |annotation_type, ann|
+          if annotation_type == @program.no_alias_annotation
+            new_arg.add_annotation(annotation_type, ann)
+          else
+            ann.raise "fun parameters can only be annotated with: NoAlias"
+          end
+        end
+      end
+      new_arg
     end
 
     external = External.new(node.name, external_args, node.body, node.real_name).at(node)
