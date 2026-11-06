@@ -103,6 +103,9 @@ class Crystal::CodeGenVisitor
       @catch_pad = nil
       @needs_value = true
 
+      old_computed_goto_fun = @computed_goto_fun
+      @computed_goto_fun = target_def.computed_goto?
+
       args = codegen_fun_signature(mangled_name, target_def, self_type, is_fun_literal, is_closure)
 
       needs_body = !target_def.is_a?(External) || is_exported_fun
@@ -216,6 +219,7 @@ class Crystal::CodeGenVisitor
       @entry_block = old_entry_block
       @alloca_block = old_alloca_block
       @needs_value = old_needs_value
+      @computed_goto_fun = old_computed_goto_fun
 
       if @debug.line_numbers?
         # set_current_debug_location associates a scope from the current fun,

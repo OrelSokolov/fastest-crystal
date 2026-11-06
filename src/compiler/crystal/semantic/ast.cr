@@ -153,6 +153,11 @@ module Crystal
     # `true` if this def has the `@[NoInline]` annotation
     property? no_inline = false
 
+    # `true` if this def has the `@[ComputedGoto]` annotation: endless
+    # `while true; case` state dispatchers in the body compile to an LLVM
+    # `switch` jump table instead of a comparison chain
+    property? computed_goto = false
+
     # `true` if this def has the `@[AlwaysInline]` annotation
     property? always_inline = false
 
@@ -233,6 +238,7 @@ module Crystal
       a_def.previous = previous
       a_def.raises = raises?
       a_def.no_inline = no_inline?
+      a_def.computed_goto = computed_goto?
       a_def.always_inline = always_inline?
       a_def.returns_twice = returns_twice?
       a_def.target_features = target_features

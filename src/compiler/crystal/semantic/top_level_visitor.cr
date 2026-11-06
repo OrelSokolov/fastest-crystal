@@ -1267,6 +1267,8 @@ class Crystal::TopLevelVisitor < Crystal::SemanticVisitor
       case annotation_type
       when @program.no_inline_annotation
         node.no_inline = true
+      when @program.computed_goto_annotation
+        node.computed_goto = true
       when @program.always_inline_annotation
         node.always_inline = true
       when @program.naked_annotation

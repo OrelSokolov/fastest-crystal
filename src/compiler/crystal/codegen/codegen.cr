@@ -266,6 +266,8 @@ module Crystal
     @argv : LLVM::Value
     @rescue_block : LLVM::BasicBlock?
     @catch_pad : LLVM::Value?
+    # `true` while codegen-ing the body of a def annotated `@[ComputedGoto]`
+    @computed_goto_fun = false
     @fun_types : Hash({LLVM::Module, String}, LLVM::Type)
     @sret_value : LLVM::Value?
     @cant_pass_closure_to_c_exception_call : Call?
@@ -1082,6 +1084,10 @@ module Crystal
         endless_while = cond.true_literal?
 
         if endless_while
+          if @computed_goto_fun && try_computed_goto_dispatch(node)
+            return false
+          end
+
           while_block = new_block "while"
 
           Phi.open(self, node, @needs_value) do |phi|
@@ -1132,6 +1138,158 @@ module Crystal
       cond codegen_cond(node_cond), then_block, else_block
 
       nil
+    end
+
+    # Computed-goto state dispatch (`@[ComputedGoto]` on the enclosing def):
+    # an endless loop whose body is a dispatch chain
+    # `state == <integer literal>` (how `case state; when 0 ...` expands)
+    # is compiled into a single LLVM `switch` (jump table) instead of a
+    # chain of comparisons, mirroring C's labels-as-values dispatch.
+    # Returns `true` if the pattern was handled, `false` to fall back to
+    # the regular codegen.
+    # Extracts the variable name if *node* is a plain local or instance var —
+    # the receivers a computed-goto dispatch chain compares on.
+    private def state_var_name(node : ASTNode?) : String?
+      case node
+      when Crystal::Var         then node.name
+      when Crystal::InstanceVar then node.name
+      else
+        nil
+      end
+    end
+
+    private def try_computed_goto_dispatch(node : While) : Bool
+      body = node.body
+      exprs = body.is_a?(Expressions) ? body.expressions : [body] of ASTNode
+
+      # Find a dispatch chain `state == <int>` among the loop body's
+      # expressions. Expressions before it run on every dispatch before the
+      # switch (preamble); expressions after it run after the handler
+      # (postamble), matching plain loop semantics.
+      chain_index = -1
+      cases = [] of {Int64, ASTNode}
+      state_node : ASTNode? = nil
+      terminal_else : ASTNode? = nil
+
+      exprs.each_with_index do |exp, j|
+        next unless exp.is_a?(If)
+
+        candidate_cases = [] of {Int64, ASTNode}
+        candidate_state : Crystal::Var | Crystal::InstanceVar | Nil = nil
+        candidate_name : String? = nil
+        current : ASTNode? = exp
+        ok = true
+
+        while current.is_a?(If)
+          cond = current.cond.single_expression
+          unless cond.is_a?(Call) || cond.is_a?(Or)
+            ok = false
+            break
+          end
+
+          # `case x when 0 ...` expands to `0 === x` (literal on the left,
+          # temp var cloned on the right); hand-written chains look like
+          # `x == 0`. Multiple conds per `when` produce `Or` — unsupported.
+          number = nil
+          state_var : ASTNode? = nil
+          if cond.is_a?(Call) && cond.args.size == 1
+            arg = cond.args.first
+            if cond.name == "===" && cond.obj.is_a?(NumberLiteral) &&
+               (state_var_name(arg))
+              number = cond.obj.as(NumberLiteral).to_number
+              state_var = arg
+            elsif cond.name == "==" && arg.is_a?(NumberLiteral) &&
+                  (state_var_name(cond.obj))
+              number = arg.to_number
+              state_var = cond.obj
+            end
+          end
+
+          state_name = state_var_name(state_var)
+
+          unless number.is_a?(Int) && number >= 0 && state_name
+            ok = false
+            break
+          end
+
+          if cname = candidate_name
+            # same state variable in every comparison (the expander clones
+            # the temp var, so compare by name)
+            unless state_name == cname
+              ok = false
+              break
+            end
+          else
+            candidate_state = state_var
+            candidate_name = state_name
+            unless state_var.try &.type?.try(&.is_a?(IntegerType))
+              ok = false
+              break
+            end
+          end
+
+          candidate_cases << {number.to_i64, current.then}
+          current = current.else
+        end
+
+        next if !ok || candidate_cases.size < 3
+
+        chain_index = j
+        cases = candidate_cases
+        state_node = candidate_state
+        terminal_else = current
+        break
+      end
+
+      return false if chain_index == -1
+
+      preamble = exprs[0...chain_index]
+      postamble = exprs[(chain_index + 1)..]
+
+      dispatch_block = new_block "dispatch"
+
+      Phi.open(self, node, @needs_value) do |phi|
+        context.while_block = dispatch_block
+        context.break_phi = phi
+        context.next_phi = nil
+
+        br dispatch_block
+
+        position_at_end dispatch_block
+
+        preamble.each { |exp| discard_value(exp) }
+
+        request_value do
+          accept state_node.not_nil!
+        end
+        state_value = @last
+
+        handler_blocks = cases.map { |tuple| new_block "op#{tuple[0]}" }
+        default_block = new_block "op_default"
+        postamble_block = new_block "postamble"
+
+        int_type = state_value.type
+        llvm_cases = cases.each_with_index.map do |tuple, i|
+          {int_type.const_int(tuple[0]), handler_blocks[i]}
+        end.to_a
+        builder.switch state_value, default_block, llvm_cases
+
+        cases.each_with_index do |tuple, i|
+          position_at_end handler_blocks[i]
+          discard_value(tuple[1])
+          br postamble_block
+        end
+
+        position_at_end default_block
+        discard_value(terminal_else.not_nil!) if terminal_else
+        br postamble_block
+
+        position_at_end postamble_block
+        postamble.each { |exp| discard_value(exp) }
+        br dispatch_block
+      end
+
+      true
     end
 
     def codegen_cond(node : ASTNode)
