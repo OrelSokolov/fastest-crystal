@@ -583,7 +583,11 @@ module Crystal
       # `-u__llvm_profile_runtime`: force-pull the runtime's registration
       # constructor from the static archive (same as clang), so counters are
       # written at exit; `-z now`: eager binding (stability with worker threads).
-      "-Wl,-u,__llvm_profile_runtime -Wl,-z,now #{pgo_runtime}"
+      # `--no-gc-sections`: the `__llvm_prf_cnts/data/names` sections are not
+      # referenced by relocations the GC roots can see, so Crystal's release
+      # `--gc-sections` would strip them and the runtime would write an empty
+      # profile (only `__llvm_prf_vnds` survives) — seen on real shard builds.
+      "-Wl,-u,__llvm_profile_runtime -Wl,-z,now -Wl,--no-gc-sections #{pgo_runtime}"
     end
 
     # Tests if `mold` or `lld` are available and prefers them as linkers over
