@@ -1778,6 +1778,11 @@ require "./repl"
         code:       pry,
       },
 
+      interpreter_intrinsics_prefetch: {
+        pop_values: [ptr : Void*, read : Int32, {% if compare_versions(Crystal::LLVM_VERSION, "15.0.0") < 0 %} rw : Int32, {% end %} locality : Int32, cache : Int32],
+        code:       nil, # performance hint only; no-op in the interpreter
+      },
+
       {% if flag?(:i386) || flag?(:x86_64) %}
         interpreter_intrinsics_pause: {
           code:       LibIntrinsics.pause,

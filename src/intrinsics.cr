@@ -61,6 +61,14 @@ lib LibIntrinsics
   {% if flag?(:interpreted) %} @[Primitive(:interpreter_intrinsics_read_cycle_counter)] {% end %}
   fun read_cycle_counter = "llvm.readcyclecounter" : UInt64
 
+  {% if compare_versions(Crystal::LLVM_VERSION, "15.0.0") < 0 %}
+    {% if flag?(:interpreted) %} @[Primitive(:interpreter_intrinsics_prefetch)] {% end %}
+    fun prefetch = "llvm.prefetch.p0i8"(ptr : Void*, read : Int32, rw : Int32, locality : Int32, cache : Int32)
+  {% else %}
+    {% if flag?(:interpreted) %} @[Primitive(:interpreter_intrinsics_prefetch)] {% end %}
+    fun prefetch = "llvm.prefetch.p0"(ptr : Void*, read : Int32, locality : Int32, cache : Int32)
+  {% end %}
+
   {% if flag?(:interpreted) %} @[Primitive(:interpreter_intrinsics_bitreverse8)] {% end %}
   fun bitreverse8 = "llvm.bitreverse.i8"(id : UInt8) : UInt8
 
@@ -209,6 +217,33 @@ module Intrinsics
 
   def self.read_cycle_counter
     LibIntrinsics.read_cycle_counter
+  end
+
+  # Hints the CPU to prefetch the data at *address* into the cache.
+  #
+  # *locality* is a cache locality hint between 0 and 3: 0 means the data is
+  # used once (no temporal locality, e.g. streaming), 3 means high temporal
+  # locality (keep in all cache levels). *read_data* selects a read prefetch
+  # (default) instead of a write prefetch. Both must be compile-time constants:
+  # LLVM requires immediate arguments for this intrinsic.
+  #
+  # Compiles to `prefetcht0`/`prefetchnta`-style instructions on x86, `prfm`
+  # on AArch64, and is a no-op on targets without prefetch support.
+  #
+  # WARNING: like `__builtin_prefetch` in C, this is a performance hint only
+  # and never changes program semantics.
+  macro prefetch(address, locality = 3, read_data = true)
+    {% unless locality.is_a?(NumberLiteral) %}
+      {% raise "Intrinsics.prefetch: locality must be an integer literal in 0..3, got #{locality}" %}
+    {% end %}
+    {% unless read_data.is_a?(BoolLiteral) %}
+      {% raise "Intrinsics.prefetch: read_data must be a bool literal (true/false), got #{read_data}" %}
+    {% end %}
+    {% if compare_versions(Crystal::LLVM_VERSION, "15.0.0") < 0 %}
+      ::LibIntrinsics.prefetch({{address}}, {{read_data ? 1 : 0}}, 1, {{locality}}, 1)
+    {% else %}
+      ::LibIntrinsics.prefetch({{address}}, {{read_data ? 1 : 0}}, {{locality}}, 1)
+    {% end %}
   end
 
   def self.bitreverse8(id) : UInt8
